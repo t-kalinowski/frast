@@ -1,0 +1,175 @@
+---
+output: github_document
+---
+
+<!-- README.md is generated from README.Rmd. Please edit that file -->
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.path = "man/figures/README-",
+  out.width = "100%"
+)
+```
+
+# frast
+
+<!-- badges: start -->
+<!-- badges: end -->
+
+`frast` is a prototype / proof-of-concept of two things:
+ 
+1)  An R-to-Fortran transpiler
+2)  A just-in-time (JIT) compiler for R functions
+
+ 
+Currently it can take an R function, and translate it to a compiled function (by way of transpiling it to Fortran). Right now it requires users to specify a variable type manifest for the R function, but that shouldn't be necessary once the JIT piece is fleshed out a little more. 
+
+Right now R functions are translated to Fortran subroutines, which are then compiled as a stand-alone Fortran 2018 module. Compilation is performed using gfortran. The compiled shared object is then dynamically loaded using `dyn.load`, and the compiled function in the loaded object can then be evaluated using `RFI::.ModernFortran`. 
+
+The next logical step in this project is to swap out the `gfortran` system calls to `flang` calls that emit LLVM IR bytecode, then use the LLVM C API to evaluate the functions. This would get around the limitations inherent in using `dyn.load`, and should give a nice speed boost too.
+
+Once the llvm piece is in place, then it would might be a good time to work on
+removing the need for explicit type manifests in R. (note-to-self: see if it's
+easy to recylce the implementation in `package:memoise`). A solid approach would
+be to add a check before `eval`ing the R function, to check if a compiled
+version of that function matching the calling arguments signature is available.
+If not, launch a background task compiling (so it will be available next time
+the function is evaluated) but proceed with evaluating the R function as normal.
+This will require forcing of all promises, but that should be a small price to
+pay for the speed boost. 
+
+## Example
+
+This is a basic example 
+
+```{r}
+library(frast)
+library(RFI)
+
+addone <- function(x) {
+  manifest(Var(x, "d", shape = ":"))
+  x = x + 1
+}
+```
+
+
+
+```{r}
+(ptr <- load_so(addone))
+RFI::.ModernFortran(ptr, array(1))
+# .Fortran(ptr, array(1))
+```
+
+Lets compile a convolve function.
+
+```{r}
+
+convolve_r <- function(a, b) {
+  ab = double(length(a) + length(b) - 1)
+  for (i in seq_along(a))
+    for (j in seq_along(b))
+      ab[i + j - 1] = ab[i + j - 1] + a[i] * b[j]
+    ab
+}
+
+convolve_rf <- function(a, b, ab) {
+  manifest(
+    Var(i, "i"),
+    Var(j, "i"),
+    Var(a, "d", 1, modifiable = FALSE),
+    Var(b, "d", 1, modifiable = FALSE),
+    Var(ab, "d", 1, modifiable = TRUE)
+  )
+  for (i in seq_along(a))
+    for (j in seq_along(b))
+      ab[i + j - 1] = ab[i + j - 1] + a[i] * b[j]
+}
+```
+
+Here is what it looks like translated to Fortran:
+```{r}
+frast:::translate(convolve_rf)
+```
+
+
+and also compare it to some alternative approaches to see what the speedup is.
+
+
+
+
+```{r}
+convolve_c_ <- inline::cfunction(
+  signature(
+    a = "double",
+    na = "integer",
+    b = "double",
+    nb = "integer",
+    ab = "double"
+  ),
+  body = "
+//void convolve(double *a, int *na, double *b, int *nb, double *ab)
+{
+    int nab = *na + *nb - 1;
+
+    for(int i = 0; i < nab; i++)
+        ab[i] = 0.0;
+    for(int i = 0; i < *na; i++)
+        for(int j = 0; j < *nb; j++)
+            ab[i + j] += a[i] * b[j];
+}", convention = ".C")
+
+convolve_c <- function(a, b) {
+  convolve_c_(a, length(a), b, length(b), 
+              double(length(a) + length(b) - 1))[[5L]]
+}
+
+convolve_r <- function(a, b) {
+  ab = double(length(a) + length(b) - 1)
+  for (i in seq_along(a))
+    for (j in seq_along(b))
+      ab[i + j - 1] = ab[i + j - 1] + a[i] * b[j]
+    ab
+}
+
+convolve_rf <- function(a, b, ab) {
+  manifest(
+    Var(i, "i"),
+    Var(j, "i"),
+    Var(a, "d", 1, modifiable = FALSE),
+    Var(b, "d", 1, modifiable = FALSE),
+    Var(ab, "d", 1, modifiable = TRUE)
+  )
+  for (i in seq_along(a))
+    for (j in seq_along(b))
+      ab[i + j - 1] = ab[i + j - 1] + a[i] * b[j]
+}
+
+ptr <- load_so(convolve_rf)
+
+convolve_f <- function(a, b) {
+  .ModernFortran(ptr, a, b, double(length(a) + length(b) - 1),
+                 DUP = FALSE)[[3L]]
+}
+
+a <- runif(1024)
+b <- runif(32)
+all.equal(convolve_r(a, b), convolve_f(a, b))
+all.equal(convolve_r(a, b), convolve_c(a, b))
+
+r <- bench::mark(convolve_f(a, b), 
+                 convolve_c(a, b), 
+                 convolve_r(a, b))
+```
+
+
+```{r, dev = 'ragg_png'}
+plot(r)
+```
+
+```{r}
+sessioninfo::session_info()
+sessioninfo::platform_info()
+```
+
