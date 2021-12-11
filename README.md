@@ -12,26 +12,27 @@
 1)  An R-to-Fortran transpiler
 2)  A just-in-time (JIT) compiler for R functions
 
-Currently it can take an R function, and translate it to a compiled
-function (by way of transpiling it to Fortran). Right now it requires
-users to specify a variable type manifest for the R function, but that
-shouldn’t be necessary once the JIT piece is fleshed out a little more.
+It takes an R function and compiles it to fast machine code, by way of transpiling it to Fortran. 
 
-Right now R functions are translated to Fortran subroutines, which are
+R functions are translated to Fortran subroutines, which are
 then compiled as a stand-alone Fortran 2018 module. Compilation is
 performed using gfortran. The compiled shared object is then dynamically
-loaded using `dyn.load`, and the compiled function in the loaded object
+loaded using `dyn.load()`, and the compiled function in the loaded object
 can then be evaluated using `RFI::.ModernFortran`.
 
-Once the llvm piece is in place, then it would might be a good time to work on
-removing the need for explicit type manifests in R. (note-to-self: see if it's
-easy to recylce the implementation in `package:memoise`). A solid approach would
+Some potential next steps:
+  + compile w/ llvm-jit toolchain (ala llvmlite/numba) instead of gfortran.
+  + remove the need for explicit type manifests in R. (note-to-self: see if it's
+easy to recycle the implementation in `package:memoise`). A solid approach would
 be to add a check before `eval`ing the R function, to check if a compiled
 version of that function matching the calling arguments signature is available.
 If not, launch a background task compiling (so it will be available next time
 the function is evaluated) but proceed with evaluating the R function as normal.
 This will require forcing of all promises, but that should be a small price to
-pay for the speed boost.
+pay for the speed boost. Also, investigate if the signature matching in S4 or R7 is flexible enough for this, or if this would require rolling a custom implementation for dispatching + caching methods.
+  + autogrenerate R wrappers for R package authors, integrate transpilation to Fortran with `R CMD build` so that 
+    packages users don't have to manage the generated Fortran files at all, while still giving package users
+    the benefits of a package that contains (auto-generated, fast, AOT compiled) Fortran subroutines.
 
 
 ## Example
